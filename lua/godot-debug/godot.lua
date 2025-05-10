@@ -3,7 +3,7 @@ local M = {}
 
 local config = require("godot-debug.config")
 local logger = require("godot-debug.logger")
-
+local notify = require("godot-debug.notifications")
 -- Store the current Godot PID
 M._godot_pid = nil
 
@@ -13,7 +13,30 @@ local function async_log(message)
 		logger.info(message)
 	end)
 end
+-- Clean build cache to help with symbol issues
+function M.clean_build()
+	notify.info("Cleaning Godot build cache")
 
+	-- Find and remove .mono directory (contains compiled assemblies)
+	local mono_dir = vim.fn.getcwd() .. "/.mono"
+	if vim.fn.isdirectory(mono_dir) == 1 then
+		local rm_cmd = vim.fn.has("win32") == 1 and "rmdir /s /q" or "rm -rf"
+		local cmd = string.format('%s "%s"', rm_cmd, mono_dir)
+		notify.debug("Removing .mono directory", { cmd = cmd })
+		vim.fn.system(cmd)
+	end
+
+	-- Find and remove bin directory (contains debug symbols)
+	local bin_dir = vim.fn.getcwd() .. "/bin"
+	if vim.fn.isdirectory(bin_dir) == 1 then
+		local rm_cmd = vim.fn.has("win32") == 1 and "rmdir /s /q" or "rm -rf"
+		local cmd = string.format('%s "%s"', rm_cmd, bin_dir)
+		notify.debug("Removing bin directory", { cmd = cmd })
+		vim.fn.system(cmd)
+	end
+
+	notify.info("Build cache cleaned")
+end
 -- Launch Godot with a scene
 function M.launch_scene(scene_path)
 	async_log("Launching Godot with scene: " .. scene_path)
@@ -235,8 +258,13 @@ function M.find_scenes()
 end
 
 -- Build Godot solutions
-function M.build_solutions()
-	async_log("Starting Godot build process")
+function M.build_solutions(force_clean)
+	if force_clean then
+		M.clean_build()
+		vim.wait(1000) -- Give the filesystem time to settle
+	end
+
+	notify.info("Starting Godot build process")
 
 	local output_file = vim.fn.stdpath("cache") .. "/godot_build.log"
 	local godot_binary = config.get("godot_binary")
