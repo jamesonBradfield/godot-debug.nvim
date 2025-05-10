@@ -5,11 +5,38 @@ local config = require("godot-debug.config")
 local logger = require("godot-debug.logger")
 local notifications = require("godot-debug.notifications")
 
--- Store the current Godot PID
-M._godot_pid = nil
+-- Check if a process is still running
+function M.is_process_running(pid)
+	if not pid or pid <= 0 then
+		return false
+	end
 
--- Store the process monitor timer
-M._process_monitor_timer = nil
+	local check_cmd
+
+	if vim.fn.has("win32") == 1 then
+		-- Windows: Use WMIC for more reliable process checking
+		check_cmd = string.format('wmic process where "ProcessId=%d" get ProcessId /value 2>nul', pid)
+	else
+		-- Unix-like systems: Use kill -0
+		check_cmd = string.format("kill -0 %d 2>/dev/null", pid)
+	end
+
+	local handle = io.popen(check_cmd, "r")
+	if not handle then
+		return false
+	end
+
+	local result = handle:read("*a")
+	local success = handle:close()
+
+	if vim.fn.has("win32") == 1 then
+		-- Windows: Check if output contains ProcessId=
+		return result and result:find("ProcessId=" .. pid) ~= nil
+	else
+		-- Unix: kill -0 returns 0 if process exists
+		return success == true
+	end
+end
 
 -- Simplified command execution
 local function run_command(cmd, options)

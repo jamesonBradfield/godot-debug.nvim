@@ -13,7 +13,7 @@ local state = {
 	in_progress = false,
 }
 
--- Export state for other modules to access
+-- Initialize state before anything else
 M._state = state
 
 -- Public API
