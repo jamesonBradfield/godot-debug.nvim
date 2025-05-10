@@ -1,31 +1,22 @@
--- File: lua/godot-debug/init.lua - Simplified version
+-- File: lua/godot-debug/init.lua - Minimal version
 local M = {}
 
--- Load modules
-local config = require("godot-debug.config")
-local logger = require("godot-debug.logger")
-local notifications = require("godot-debug.notifications")
-local godot = require("godot-debug.godot")
-local dap_config = require("godot-debug.dap")
-
--- Simple state tracking (like the original)
 local state = {
 	in_progress = false,
 }
 
--- Export state for other modules
 M._state = state
 
--- Public API
+-- Minimal setup
 function M.setup(user_config)
-	-- Initialize configuration
+	local config = require("godot-debug.config")
+	local dap_config = require("godot-debug.dap")
+
 	config.setup(user_config)
-
-	-- Initialize logger
-	logger.setup()
-
-	-- Setup DAP configurations
 	dap_config.setup()
+
+	-- Store PID for DAP
+	M._godot_pid = nil
 
 	-- Create user commands
 	vim.api.nvim_create_user_command("GodotDebug", function()
@@ -33,27 +24,27 @@ function M.setup(user_config)
 	end, {})
 
 	vim.api.nvim_create_user_command("GodotQuit", function()
+		local godot = require("godot-debug.godot")
 		godot.kill_processes()
 	end, {})
-
-	logger.info("Godot debug plugin initialized")
 end
 
+-- Minimal launch function (exactly like the original)
 function M.launch()
-	-- Simple state check (like the original)
 	if state.in_progress then
-		notifications.warn("Debug session already in progress")
+		print("Debug session already in progress")
 		return
 	end
 
-	logger.info("Starting debug session...")
 	state.in_progress = true
+
+	local godot = require("godot-debug.godot")
 
 	-- Step 1: Select scene
 	godot.select_scene(function(scene_path)
 		if not scene_path then
 			state.in_progress = false
-			logger.error("No scene selected, aborting")
+			print("No scene selected")
 			return
 		end
 
@@ -61,41 +52,32 @@ function M.launch()
 		local build_success = godot.build_solutions()
 		if not build_success then
 			state.in_progress = false
-			logger.error("Build failed, aborting")
+			print("Build failed")
 			return
 		end
 
 		-- Step 3: Launch Godot
 		local pid = godot.launch_scene(scene_path)
-		if not pid then
+		if not pid or pid <= 0 then
 			state.in_progress = false
-			logger.error("Failed to launch Godot, aborting")
+			print("Failed to launch")
 			return
 		end
 
 		-- Step 4: Connect debugger
-		local debug_success = godot.connect_debugger(pid)
+		M._godot_pid = pid
+		local dap = require("dap")
 
-		-- Reset state after connecting (like the original)
-		state.in_progress = false
-
-		if not debug_success then
-			logger.error("Failed to connect debugger")
-			return
-		end
-
-		logger.info("Debug session started successfully")
+		-- Wait a moment for Godot to start
+		vim.defer_fn(function()
+			dap.continue()
+			state.in_progress = false
+		end, 1000)
 	end)
 end
 
 function M.set_log_level(level)
-	logger.set_level(level)
-end
-
--- Simple state reset
-function M.reset_state()
-	state.in_progress = false
-	logger.info("Debug session state reset")
+	-- Empty for now
 end
 
 return M

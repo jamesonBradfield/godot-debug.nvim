@@ -1,13 +1,20 @@
--- File: lua/godot-debug/dap.lua - Simplified version
+-- File: lua/godot-debug/dap.lua - Async version without blocking prints
 local M = {}
 
 local config = require("godot-debug.config")
 local logger = require("godot-debug.logger")
 
+-- Async logging function
+local function async_log(message)
+	vim.schedule(function()
+		logger.info(message)
+	end)
+end
+
 function M.setup()
 	local dap = require("dap")
 
-	-- Simple netcoredbg adapter (minimal configuration)
+	-- Simple netcoredbg adapter without blocking
 	dap.adapters.godot_mono = function(callback, adapter_config)
 		if adapter_config.request == "attach" then
 			callback({
@@ -16,27 +23,27 @@ function M.setup()
 				args = { "--interpreter=vscode" },
 			})
 		else
-			callback(nil, "Godot Mono adapter only supports attach mode")
+			callback(nil, "Invalid request type")
 		end
 	end
 
-	-- Configure C# debugging (minimal configuration)
+	-- Minimal DAP configuration
 	dap.configurations.cs = {
 		{
 			type = "godot_mono",
 			request = "attach",
 			name = "Attach to Godot Mono",
 			processId = function()
-				local godot = require("godot-debug.godot")
+				local main = require("godot-debug")
 
 				-- Use stored PID if available
-				if godot._godot_pid and godot._godot_pid > 0 then
-					logger.info("Using stored Godot PID: " .. godot._godot_pid)
-					return godot._godot_pid
+				if main._godot_pid and main._godot_pid > 0 then
+					async_log("Using stored Godot PID: " .. main._godot_pid)
+					return main._godot_pid
 				end
 
 				-- Fallback to process picker
-				logger.warn("No stored PID, using process picker")
+				async_log("No stored PID, using process picker")
 				return require("dap.utils").pick_process()
 			end,
 			justMyCode = false,
@@ -46,7 +53,7 @@ function M.setup()
 	-- Also register for gdscript
 	dap.configurations.gdscript = dap.configurations.cs
 
-	-- Simple auto-detection (like the original)
+	-- Minimal auto-detection
 	if config.get("auto_detect") then
 		local original_continue = dap.continue
 
@@ -54,31 +61,29 @@ function M.setup()
 			local is_godot = M.is_godot_project()
 			local main = require("godot-debug")
 
-			-- Simple check like the original
 			if is_godot and not main._state.in_progress and not dap.session() then
-				logger.info("Detected Godot project, launching Godot debugger")
+				async_log("Detected Godot project, launching Godot debugger")
 				main.launch()
 			else
-				logger.info("Using original continue function")
 				original_continue()
 			end
 		end
 	end
 
-	-- Minimal event listeners (no breakpoint handling)
-	dap.listeners.before.event_terminated["godot_debug"] = function()
-		logger.info("DAP session terminated")
+	-- Essential event listeners only
+	dap.listeners.after.event_terminated["godot_debug"] = function()
+		async_log("DAP session terminated")
 		local main = require("godot-debug")
-		main.reset_state()
+		main._state.in_progress = false
 	end
 
-	dap.listeners.before.event_exited["godot_debug"] = function()
-		logger.info("DAP session exited")
+	dap.listeners.after.event_exited["godot_debug"] = function()
+		async_log("DAP session exited")
 		local main = require("godot-debug")
-		main.reset_state()
+		main._state.in_progress = false
 	end
 
-	logger.info("DAP configuration complete")
+	async_log("DAP configuration complete")
 end
 
 -- Simple project detection
