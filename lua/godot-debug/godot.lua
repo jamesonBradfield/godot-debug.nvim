@@ -255,10 +255,30 @@ function M.build_solutions()
 
 		-- Create build output buffer if needed
 		if config.get("show_build_output") then
-			local buf = vim.api.nvim_create_buf(false, true)
-			vim.api.nvim_buf_set_name(buf, "Godot Build Output")
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-			vim.api.nvim_buf_set_option(buf, "filetype", "log")
+			-- Find existing buffer or create new one
+			local buf_name = "Godot Build Output"
+			local buf_id = nil
+
+			-- Check if buffer already exists
+			for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+				local name = vim.api.nvim_buf_get_name(buf)
+				if name:match(buf_name .. "$") then
+					buf_id = buf
+					break
+				end
+			end
+
+			-- Create new buffer if needed
+			if not buf_id then
+				buf_id = vim.api.nvim_create_buf(false, true)
+				vim.api.nvim_buf_set_name(buf_id, buf_name)
+			end
+
+			-- Set buffer content and options
+			vim.api.nvim_buf_set_option(buf_id, "modifiable", true)
+			vim.api.nvim_buf_set_lines(buf_id, 0, -1, false, lines)
+			vim.api.nvim_buf_set_option(buf_id, "modifiable", false)
+			vim.api.nvim_buf_set_option(buf_id, "filetype", "log")
 		end
 
 		-- Check for errors
@@ -366,21 +386,27 @@ function M.connect_debugger(pid)
 
 	M._godot_pid = pid
 
-	local dap = require("dap")
+	-- Wait a bit for Godot to fully start up
+	vim.defer_fn(function()
+		local dap = require("dap")
 
-	-- Start debug session
-	local success, err = pcall(function()
-		dap.continue()
-	end)
+		-- Start debug session
+		local success, err = pcall(function()
+			dap.continue()
+		end)
 
-	if success then
-		notifications.update_progress("debug", "Debug session started", true)
-		return true
-	else
-		logger.error("Failed to start debug session: " .. tostring(err))
-		notifications.update_progress("debug", "Failed to connect debugger", false)
-		return false
-	end
+		if success then
+			notifications.update_progress("debug", "Debug session started", true)
+			logger.info("DAP session successfully started for PID: " .. pid)
+			return true
+		else
+			logger.error("Failed to start debug session: " .. tostring(err))
+			notifications.update_progress("debug", "Failed to connect debugger", false)
+			return false
+		end
+	end, 2000) -- Wait 2 seconds for Godot to fully start
+
+	return true
 end
 
 -- Kill all Godot processes

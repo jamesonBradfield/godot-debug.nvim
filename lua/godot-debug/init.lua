@@ -1,4 +1,4 @@
--- File: lua/godot-debug/init.lua
+-- File: lua/godot-debug/init.lua - Simplified version
 local M = {}
 
 -- Load modules
@@ -8,12 +8,12 @@ local notifications = require("godot-debug.notifications")
 local godot = require("godot-debug.godot")
 local dap_config = require("godot-debug.dap")
 
--- State tracking
+-- Simple state tracking (like the original)
 local state = {
 	in_progress = false,
 }
 
--- Initialize state before anything else
+-- Export state for other modules
 M._state = state
 
 -- Public API
@@ -40,9 +40,8 @@ function M.setup(user_config)
 end
 
 function M.launch()
-	-- Prevent multiple simultaneous launches
+	-- Simple state check (like the original)
 	if state.in_progress then
-		logger.warn("Debug session already in progress, ignoring launch request")
 		notifications.warn("Debug session already in progress")
 		return
 	end
@@ -50,35 +49,35 @@ function M.launch()
 	logger.info("Starting debug session...")
 	state.in_progress = true
 
-	-- Step 1: Select scene with callback (asynchronous)
+	-- Step 1: Select scene
 	godot.select_scene(function(scene_path)
-		logger.info("Scene selection callback received: " .. tostring(scene_path))
-
 		if not scene_path then
-			logger.error("No scene selected, aborting")
 			state.in_progress = false
+			logger.error("No scene selected, aborting")
 			return
 		end
 
 		-- Step 2: Build solutions
 		local build_success = godot.build_solutions()
 		if not build_success then
-			logger.error("Build failed, aborting")
 			state.in_progress = false
+			logger.error("Build failed, aborting")
 			return
 		end
 
 		-- Step 3: Launch Godot
 		local pid = godot.launch_scene(scene_path)
 		if not pid then
-			logger.error("Failed to launch Godot, aborting")
 			state.in_progress = false
+			logger.error("Failed to launch Godot, aborting")
 			return
 		end
 
 		-- Step 4: Connect debugger
 		local debug_success = godot.connect_debugger(pid)
-		state.in_progress = false -- Reset state after debugger connects
+
+		-- Reset state after connecting (like the original)
+		state.in_progress = false
 
 		if not debug_success then
 			logger.error("Failed to connect debugger")
@@ -91,6 +90,12 @@ end
 
 function M.set_log_level(level)
 	logger.set_level(level)
+end
+
+-- Simple state reset
+function M.reset_state()
+	state.in_progress = false
+	logger.info("Debug session state reset")
 end
 
 return M
