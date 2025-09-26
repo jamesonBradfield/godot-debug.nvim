@@ -1,6 +1,6 @@
 # godot-debug.nvim
 
-A Neovim plugin for seamless debugging of Godot Mono/C# projects with integrated scene selection, solution building, and direct process attachment.
+A WIP Neovim plugin for seamless debugging of Godot Mono/C# projects with integrated scene selection, solution building, and direct process attachment.
 
 ## Features
 
