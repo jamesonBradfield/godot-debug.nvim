@@ -129,7 +129,7 @@ function M.launch()
 
 			-- Use pcall to catch any DAP errors
 			local success, err = pcall(function()
-				require("godot-debug.godot").connect_debugger(pid)
+				dap.continue()
 			end)
 
 			if success then

@@ -14,24 +14,6 @@ local function async_log(message)
 	end)
 end
 
-function M.clean_build()
-	notify.info("Cleaning Godot build cache")
-
-	local dirs_to_clean = { "/.mono", "/bin", "/.godot/mono" }
-
-	for _, dir in ipairs(dirs_to_clean) do
-		local full_path = vim.fn.getcwd() .. dir
-		if vim.fn.isdirectory(full_path) == 1 then
-			local rm_cmd = vim.fn.has("win32") == 1 and "rmdir /s /q" or "rm -rf"
-			local cmd = string.format('%s "%s"', rm_cmd, full_path)
-			notify.debug("Removing directory", { path = full_path })
-			vim.fn.system(cmd)
-		end
-	end
-
-	notify.info("Build cache cleaned")
-end
-
 function M.launch_scene(scene_path)
 	async_log("Launching Godot with scene: " .. scene_path)
 
@@ -60,8 +42,6 @@ function M.launch_scene(scene_path)
 	-- Build command with proper debug flags
 	local cmd_args = {
 		godot_binary,
-		"--debug", -- Enable debugging
-		"--verbose", -- Verbose output
 		"--path",
 		project_dir, -- Specify project path
 		rel_scene_path, -- Scene to run

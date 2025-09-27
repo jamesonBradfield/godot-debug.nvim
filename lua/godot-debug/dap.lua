@@ -68,7 +68,7 @@ function M.setup()
 			},
 		})
 	end
-
+	notify.info("Changing dap config to PID")
 	-- Enhanced DAP configuration
 	dap.configurations.cs = {
 		{
@@ -129,52 +129,28 @@ function M.setup()
 	-- Also register for gdscript
 	dap.configurations.gdscript = dap.configurations.cs
 
-	-- Auto-detection with better error handling
-	if config.get("auto_detect") then
-		local original_continue = dap.continue
-
-		dap.continue = function()
-			notify.debug("DAP continue called")
-
-			local is_godot = M.is_godot_project()
-			local main = require("godot-debug")
-
-			if is_godot and not main._state.in_progress and not dap.session() then
-				notify.info("Detected Godot project, launching debugger")
-				main.launch()
-			else
-				notify.debug("Continuing with standard DAP", {
-					is_godot = is_godot,
-					in_progress = main._state.in_progress,
-					has_session = dap.session() ~= nil,
-				})
-				original_continue()
-			end
-		end
-	end
-
 	-- Event listeners for debugging
 	dap.listeners.before.attach.godot_debug = function(session, body)
-		notify.debug("DAP before attach", { body = body })
+		notify.debug("DAP before attach", { session = session, body = body })
 	end
 
 	dap.listeners.after.attach.godot_debug = function(session, body)
-		notify.info("DAP attached successfully")
+		notify.info("DAP attached successfully", { session = session, body = body })
 	end
 
 	dap.listeners.after.event_initialized.godot_debug = function(session, body)
-		notify.info("DAP session initialized")
+		notify.info("DAP session initialized", { session = session, body = body })
 	end
 
 	dap.listeners.after.event_terminated.godot_debug = function(session, body)
-		notify.warn("DAP session terminated", { body = body })
+		notify.warn("DAP session terminated", { session = session, body = body })
 		local main = require("godot-debug")
 		main._state.in_progress = false
 		main._godot_pid = nil
 	end
 
 	dap.listeners.after.event_exited.godot_debug = function(session, body)
-		notify.warn("DAP session exited", { exit_code = body and body.exitCode })
+		notify.warn("DAP session exited", { session = session, exit_code = body and body.exitCode })
 		local main = require("godot-debug")
 		main._state.in_progress = false
 		main._godot_pid = nil
@@ -184,6 +160,7 @@ function M.setup()
 	dap.listeners.after.configurationDone.godot_debug = function(session, err)
 		if err then
 			notify.error("DAP configuration failed", {
+				session = session,
 				error = err,
 				message = err.message,
 			})
@@ -199,10 +176,11 @@ function M.setup()
 			notify.info("DAP configuration completed successfully")
 		end
 	end
-
-	dap.listeners.after.error.godot_debug = function(session, err)
-		notify.error("DAP error occurred", { error = err })
-	end
+	--NOTE: error field not there
+	--
+	-- dap.listeners.after.error.godot_debug = function(session, err)
+	-- 	notify.error("DAP error occurred", { error = err })
+	-- end
 
 	notify.info("DAP configuration complete")
 end
@@ -229,59 +207,6 @@ function M.is_godot_project()
 	end
 
 	return false
-end
-
-function M.rebuild_and_restart()
-	notify.info("Rebuilding and restarting debug session...")
-
-	local dap = require("dap")
-	if dap.session() then
-		dap.disconnect()
-		vim.wait(1000)
-	end
-
-	local godot = require("godot-debug.godot")
-
-	-- Clean and rebuild
-	godot.clean_build()
-	vim.wait(500)
-
-	local build_success = godot.build_solutions(true) -- force clean build
-
-	if build_success then
-		vim.wait(2000)
-		godot.kill_processes()
-		vim.wait(1000)
-
-		local main = require("godot-debug")
-		main.launch()
-	else
-		notify.error("Rebuild failed, check build output")
-	end
-end
-
--- Helper to verify debug symbols exist
-function M.verify_debug_symbols()
-	local debug_path = vim.fn.getcwd() .. "\\.godot\\mono\\temp\\bin\\Debug"
-
-	if vim.fn.isdirectory(debug_path) == 0 then
-		notify.error("Debug directory not found: " .. debug_path)
-		notify.info("Run :GodotDebugRebuild to generate debug symbols")
-		return false
-	end
-
-	-- Check for .pdb files (Windows) or .mdb files (Linux/Mac)
-	local pdb_files = vim.fn.glob(debug_path .. "/*.pdb", false, true)
-	local mdb_files = vim.fn.glob(debug_path .. "/*.mdb", false, true)
-
-	if #pdb_files == 0 and #mdb_files == 0 then
-		notify.error("No debug symbols found in " .. debug_path)
-		notify.info("Run :GodotDebugRebuild to generate debug symbols")
-		return false
-	end
-
-	notify.info("Found debug symbols in " .. debug_path)
-	return true
 end
 
 return M

@@ -16,16 +16,16 @@ local function write_to_log(level, message, data)
 	ensure_log_file()
 
 	local timestamp = os.date("%Y-%m-%d %H:%M:%S")
-	local log_entry = string.format("[%s] %s: %s", timestamp, level, message)
+	local log_entry = string.format("[Godot Debug] [%s] %s: %s", timestamp, level, message)
 
 	if data then
-		log_entry = log_entry .. "\nData: " .. vim.inspect(data)
+		log_entry = log_entry .. "\n Data: " .. vim.inspect(data)
 	end
 
 	vim.fn.writefile({ log_entry, "" }, log_file, "a")
 
 	if level == "ERROR" or level == "WARNING" then
-		print(string.format("[Godot Debug] %s: %s", level, message))
+		print(string.format("[Godot Debug] %s: %s", timestamp, level, message))
 	end
 end
 
@@ -89,19 +89,19 @@ function M.hide(id)
 	end
 end
 
-function M.info(message)
-	write_to_log("INFO", message)
-	require("snacks").notify.info(message)
+function M.info(message, data)
+	write_to_log("INFO", message, data)
+	require("snacks").notify.info(message, data)
 end
 
-function M.warn(message)
-	write_to_log("WARNING", message)
-	require("snacks").notify.warn(message)
+function M.warn(message, data)
+	write_to_log("WARNING", message, data)
+	require("snacks").notify.warn(message, data)
 end
 
-function M.error(message)
-	write_to_log("ERROR", message)
-	require("snacks").notify.error(message)
+function M.error(message, data)
+	write_to_log("ERROR", message, data)
+	require("snacks").notify.error(message, data)
 end
 
 function M.debug(message, data)
