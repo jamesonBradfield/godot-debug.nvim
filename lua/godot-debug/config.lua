@@ -6,7 +6,7 @@ local defaults = {
 	godot_binary = vim.fn.has("win32") == 1 and "godot-mono.exe" or "godot-mono",
 	exclude_dirs = { "addons/", "src/" },
 	scene_cache_file = vim.fn.stdpath("cache") .. "/godot_last_scene.txt",
-	debug_mode = false,
+	debug_mode = true,
 	auto_detect = true,
 	ignore_build_errors = {
 		"GdUnit.*Can't establish server.*Already in use",

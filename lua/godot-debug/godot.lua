@@ -1,165 +1,165 @@
--- File: lua/godot-debug/godot.lua - Async version without blocking prints
+-- File: lua/godot-debug/godot.lua - Improved launch process
 local M = {}
 
 local config = require("godot-debug.config")
 local logger = require("godot-debug.logger")
 local notify = require("godot-debug.notifications")
--- Store the current Godot PID
-M._godot_pid = nil
 
--- Async logging function
+M._godot_pid = nil
+M._godot_job = nil
+
 local function async_log(message)
 	vim.schedule(function()
 		logger.info(message)
 	end)
 end
--- Clean build cache to help with symbol issues
+
 function M.clean_build()
 	notify.info("Cleaning Godot build cache")
 
-	-- Find and remove .mono directory (contains compiled assemblies)
-	local mono_dir = vim.fn.getcwd() .. "/.mono"
-	if vim.fn.isdirectory(mono_dir) == 1 then
-		local rm_cmd = vim.fn.has("win32") == 1 and "rmdir /s /q" or "rm -rf"
-		local cmd = string.format('%s "%s"', rm_cmd, mono_dir)
-		notify.debug("Removing .mono directory", { cmd = cmd })
-		vim.fn.system(cmd)
-	end
+	local dirs_to_clean = { "/.mono", "/bin", "/.godot/mono" }
 
-	-- Find and remove bin directory (contains debug symbols)
-	local bin_dir = vim.fn.getcwd() .. "/bin"
-	if vim.fn.isdirectory(bin_dir) == 1 then
-		local rm_cmd = vim.fn.has("win32") == 1 and "rmdir /s /q" or "rm -rf"
-		local cmd = string.format('%s "%s"', rm_cmd, bin_dir)
-		notify.debug("Removing bin directory", { cmd = cmd })
-		vim.fn.system(cmd)
+	for _, dir in ipairs(dirs_to_clean) do
+		local full_path = vim.fn.getcwd() .. dir
+		if vim.fn.isdirectory(full_path) == 1 then
+			local rm_cmd = vim.fn.has("win32") == 1 and "rmdir /s /q" or "rm -rf"
+			local cmd = string.format('%s "%s"', rm_cmd, full_path)
+			notify.debug("Removing directory", { path = full_path })
+			vim.fn.system(cmd)
+		end
 	end
 
 	notify.info("Build cache cleaned")
 end
--- Launch Godot with a scene
+
 function M.launch_scene(scene_path)
 	async_log("Launching Godot with scene: " .. scene_path)
 
 	local godot_binary = config.get("godot_binary")
 
-	-- Kill any existing processes first
+	-- Kill existing processes
 	M.kill_processes()
-	vim.wait(300)
+	vim.wait(500)
 
 	-- Find project root
-	local project_dir = vim.fn.fnamemodify(scene_path, ":h")
-	while vim.fn.filereadable(project_dir .. "/project.godot") ~= 1 do
-		local new_dir = vim.fn.fnamemodify(project_dir, ":h")
-		if new_dir == project_dir then
-			async_log("ERROR: Could not find project.godot")
-			return nil
-		end
-		project_dir = new_dir
+	local project_dir = vim.fn.getcwd()
+	local project_file = vim.fn.findfile("project.godot", ".;")
+
+	if project_file == "" then
+		notify.error("Could not find project.godot")
+		return nil
 	end
 
-	-- Calculate relative path
+	if project_file ~= "project.godot" then
+		project_dir = vim.fn.fnamemodify(project_file, ":h")
+	end
+
+	-- Make scene path relative to project
 	local rel_scene_path = vim.fn.fnamemodify(scene_path, ":.")
 
-	-- Use vim.system if available (Neovim 0.10+)
-	local pid = nil
-	if vim.system then
-		local cmd_array = { godot_binary, "--debug", "--debug-mono", "--verbose", rel_scene_path }
+	-- Build command with proper debug flags
+	local cmd_args = {
+		godot_binary,
+		"--debug", -- Enable debugging
+		"--verbose", -- Verbose output
+		"--path",
+		project_dir, -- Specify project path
+		rel_scene_path, -- Scene to run
+	}
 
-		local job = vim.system(cmd_array, {
-			cwd = project_dir,
-			detach = true,
-		})
-
-		if job and job.pid then
-			pid = job.pid
-			M._godot_pid = pid
-			async_log("Godot launched with PID: " .. pid)
-		end
-	else
-		-- Fallback for older Neovim versions
-		local launch_cmd = string.format(
-			'cd "%s" && %s --debug --debug-mono --verbose "%s" &',
-			project_dir,
-			godot_binary,
-			rel_scene_path
-		)
-
-		-- Use jobstart for async execution
-		local job_id = vim.fn.jobstart(launch_cmd, {
-			detach = true,
-			on_exit = function(_, code)
-				async_log("Godot process exited with code: " .. code)
-			end,
-		})
-
-		if job_id > 0 then
-			-- Give Godot time to start, then find its PID
-			vim.defer_fn(function()
-				local find_cmd = 'pgrep -f "' .. godot_binary .. ".*" .. rel_scene_path .. '"'
-				local handle = io.popen(find_cmd)
-				if handle then
-					local pid_str = handle:read("*line")
-					handle:close()
-
-					if pid_str then
-						pid = tonumber(pid_str)
-						M._godot_pid = pid
-						async_log("Found Godot PID: " .. pid)
-					end
+	-- Launch using jobstart for better control
+	local job_opts = {
+		cwd = project_dir,
+		detach = false, -- Keep attached to get output
+		on_stdout = function(job_id, data, event)
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					notify.verbose("Godot stdout", { line = line })
 				end
-			end, 1000)
-		end
+			end
+		end,
+		on_stderr = function(job_id, data, event)
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					notify.verbose("Godot stderr", { line = line })
+				end
+			end
+		end,
+		on_exit = function(job_id, exit_code, event)
+			notify.info("Godot process exited", { code = exit_code })
+			M._godot_pid = nil
+			M._godot_job = nil
+		end,
+	}
+
+	M._godot_job = vim.fn.jobstart(cmd_args, job_opts)
+
+	if M._godot_job <= 0 then
+		notify.error("Failed to start Godot process")
+		return nil
 	end
 
-	return pid
-end
-
--- Connect debugger to Godot
-function M.connect_debugger(pid)
-	async_log("Connecting debugger to PID: " .. pid)
-
-	M._godot_pid = pid
-
-	-- Wait for Godot to be ready
+	-- Get the actual PID
 	vim.defer_fn(function()
-		local dap = require("dap")
-
-		-- Start debug session
-		local success, err = pcall(function()
-			dap.continue()
-		end)
-
-		if not success then
-			async_log("Failed to start debug session: " .. tostring(err))
+		-- Find PID of the launched process
+		local find_cmd
+		if vim.fn.has("win32") == 1 then
+			find_cmd =
+				string.format("wmic process where \"name like '%%%s%%'\" get ProcessId /format:value", godot_binary)
+		else
+			find_cmd = string.format('pgrep -f "%s.*%s"', godot_binary, rel_scene_path)
 		end
-	end, 2000)
 
-	return true
+		local handle = io.popen(find_cmd)
+		if handle then
+			local output = handle:read("*a")
+			handle:close()
+
+			local pid
+			if vim.fn.has("win32") == 1 then
+				pid = output:match("ProcessId=(%d+)")
+			else
+				pid = output:match("(%d+)")
+			end
+
+			if pid then
+				M._godot_pid = tonumber(pid)
+				notify.info("Godot launched with PID: " .. M._godot_pid)
+			end
+		end
+	end, 500)
+
+	return M._godot_job
 end
 
--- Kill Godot processes
 function M.kill_processes()
+	-- Kill job if we have one
+	if M._godot_job and M._godot_job > 0 then
+		vim.fn.jobstop(M._godot_job)
+		M._godot_job = nil
+	end
+
+	-- Kill by binary name
 	local godot_binary = config.get("godot_binary")
 	local kill_cmd
 
 	if vim.fn.has("win32") == 1 then
-		kill_cmd = "taskkill /F /IM " .. godot_binary .. " 2>nul"
+		kill_cmd = string.format("taskkill /F /IM %s.exe 2>nul", godot_binary)
 	else
-		kill_cmd = 'pkill -f "' .. godot_binary .. '" 2>/dev/null'
+		kill_cmd = string.format('pkill -f "%s" 2>/dev/null', godot_binary)
 	end
 
 	vim.fn.system(kill_cmd)
+	M._godot_pid = nil
 end
 
--- Select a scene using the picker
 function M.select_scene(callback)
 	async_log("Starting scene selection...")
 
 	local scenes = M.find_scenes()
 
 	if #scenes == 0 then
-		async_log("No scenes found")
+		notify.error("No scenes found in project")
 		if callback then
 			callback(nil)
 		end
@@ -195,14 +195,14 @@ function M.select_scene(callback)
 		end
 	end
 
-	-- Use vim.ui.select properly
 	vim.ui.select(display_items, {
 		prompt = "Select Godot Scene:",
+		format_item = function(item)
+			return item
+		end,
 	}, function(choice)
 		if choice and file_map[choice] then
 			local selected_scene = file_map[choice]
-
-			-- Save selection
 			vim.fn.writefile({ selected_scene }, cache_file)
 
 			if callback then
@@ -216,15 +216,13 @@ function M.select_scene(callback)
 	end)
 end
 
--- Find scenes in current project
 function M.find_scenes()
 	local find_cmd
 
 	if vim.fn.has("win32") == 1 then
-		find_cmd =
-			'powershell -Command "Get-ChildItem -Path . -Filter *.tscn -Recurse | Select-Object -ExpandProperty FullName"'
+		find_cmd = "where /r . *.tscn 2>nul"
 	else
-		find_cmd = 'find "' .. vim.fn.getcwd() .. '" -name "*.tscn"'
+		find_cmd = 'find "' .. vim.fn.getcwd() .. '" -name "*.tscn" 2>/dev/null'
 	end
 
 	local handle = io.popen(find_cmd)
@@ -257,104 +255,51 @@ function M.find_scenes()
 	return scenes
 end
 
--- Build Godot solutions
 function M.build_solutions(force_clean)
 	if force_clean then
 		M.clean_build()
-		vim.wait(1000) -- Give the filesystem time to settle
+		vim.wait(1000)
 	end
 
-	notify.info("Starting Godot build process")
+	notify.info("Building Godot solutions...")
 
 	local output_file = vim.fn.stdpath("cache") .. "/godot_build.log"
 	local godot_binary = config.get("godot_binary")
 
-	local build_cmd
-	if vim.fn.has("win32") == 1 then
-		build_cmd = string.format('%s --headless --build-solutions > "%s" 2>&1', godot_binary, output_file)
-	else
-		build_cmd = string.format('%s --headless --build-solutions > "%s" 2>&1', godot_binary, output_file)
-	end
+	-- Build command with proper flags
+	local build_cmd = string.format('%s --headless --build-solutions --verbose > "%s" 2>&1', godot_binary, output_file)
 
-	-- Run build command using jobstart for async execution
-	local job_id = vim.fn.jobstart(build_cmd, {
-		on_exit = function(_, code)
-			async_log("Build process completed with code: " .. code)
-		end,
-	})
+	notify.debug("Running build command", { cmd = build_cmd })
 
-	if job_id <= 0 then
-		async_log("Failed to start build process")
-		return false
-	end
-
-	-- Wait for completion or timeout
-	local timeout = config.get("build_timeout") * 1000
-	local start_time = os.clock()
-	local build_complete = false
-
-	while (os.clock() - start_time) * 1000 < timeout do
-		vim.wait(1000)
-
-		if vim.fn.filereadable(output_file) == 1 then
-			local lines = vim.fn.readfile(output_file)
-
-			-- Check for completion marker
-			for _, line in ipairs(lines) do
-				if line:find("dotnet_build_project: end") then
-					build_complete = true
-					break
-				end
-			end
-
-			if build_complete then
-				break
-			end
-		end
-	end
-
-	-- Kill the process if it's still running after timeout
-	if not build_complete then
-		vim.fn.jobstop(job_id)
-		vim.wait(500)
-	end
+	-- Run build synchronously to ensure it completes
+	vim.fn.system(build_cmd)
 
 	-- Check build results
 	if vim.fn.filereadable(output_file) == 1 then
 		local lines = vim.fn.readfile(output_file)
 
-		-- Create build output buffer if needed
+		-- Show build output if configured
 		if config.get("show_build_output") then
 			local buf_name = "Godot Build Output"
-			local buf_id = nil
+			local buf_id = vim.fn.bufnr(buf_name)
 
-			-- Check if buffer already exists
-			for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-				local name = vim.api.nvim_buf_get_name(buf)
-				if name:match(buf_name .. "$") then
-					buf_id = buf
-					break
-				end
-			end
-
-			-- Create new buffer if needed
-			if not buf_id then
+			if buf_id == -1 then
 				buf_id = vim.api.nvim_create_buf(false, true)
 				vim.api.nvim_buf_set_name(buf_id, buf_name)
 			end
 
-			-- Set buffer content
-			vim.api.nvim_buf_set_option(buf_id, "modifiable", true)
+			vim.bo[buf_id].modifiable = true
 			vim.api.nvim_buf_set_lines(buf_id, 0, -1, false, lines)
-			vim.api.nvim_buf_set_option(buf_id, "modifiable", false)
-			vim.api.nvim_buf_set_option(buf_id, "filetype", "log")
+			vim.bo[buf_id].modifiable = false
+			vim.bo[buf_id].filetype = "log"
 		end
 
 		-- Check for errors
 		local has_errors = false
+		local error_count = 0
+
 		for _, line in ipairs(lines) do
 			if line:match("Error:") or line:match("error CS%d+:") then
-				-- Check if it's an ignorable error
 				local ignorable = false
 				for _, pattern in ipairs(config.get("ignore_build_errors")) do
 					if line:match(pattern) then
@@ -365,13 +310,21 @@ function M.build_solutions(force_clean)
 
 				if not ignorable then
 					has_errors = true
-					break
+					error_count = error_count + 1
+					notify.error("Build error: " .. line)
 				end
 			end
 		end
 
+		if has_errors then
+			notify.error(string.format("Build failed with %d errors", error_count))
+		else
+			notify.info("Build completed successfully")
+		end
+
 		return not has_errors
 	else
+		notify.error("Build output file not found")
 		return false
 	end
 end

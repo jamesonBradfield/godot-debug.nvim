@@ -1,44 +1,75 @@
--- File: lua/godot-debug/dap.lua - Enhanced with better error handling
+-- File: lua/godot-debug/dap.lua
 local M = {}
 
 local config = require("godot-debug.config")
 local notify = require("godot-debug.notifications")
 
+-- Helper to find Godot process more reliably
+local function find_godot_process()
+	local godot_binary = config.get("godot_binary")
+
+	-- Try to find Godot process by name
+	local cmd = string.format('pgrep -f "%s"', godot_binary)
+	if vim.fn.has("win32") == 1 then
+		-- Windows: Use wmic to find process
+		cmd = string.format("wmic process where \"name like '%%%s%%'\" get ProcessId /format:value", godot_binary)
+	end
+
+	local handle = io.popen(cmd)
+	if not handle then
+		return nil
+	end
+
+	local output = handle:read("*a")
+	handle:close()
+
+	-- Parse PID from output
+	local pid = nil
+	if vim.fn.has("win32") == 1 then
+		-- Windows output format: ProcessId=12345
+		pid = output:match("ProcessId=(%d+)")
+	else
+		-- Unix: pgrep returns PID directly
+		pid = output:match("(%d+)")
+	end
+
+	return pid and tonumber(pid) or nil
+end
+
 function M.setup()
 	local dap = require("dap")
 
-	-- Enhanced netcoredbg adapter with better error handling
+	-- Enhanced netcoredbg adapter
 	dap.adapters.godot_mono = function(callback, adapter_config)
 		notify.debug("Setting up DAP adapter", { adapter_config = adapter_config })
 
-		if adapter_config.request == "attach" then
-			-- Check if netcoredbg is available
-			local netcoredbg_path = vim.fn.exepath("netcoredbg")
-			if not netcoredbg_path or netcoredbg_path == "" then
-				notify.error("netcoredbg not found in PATH. Please install it with: brew install netcoredbg")
-				callback(nil, "netcoredbg not found")
-				return
-			end
-
-			notify.debug("Found netcoredbg", { path = netcoredbg_path })
-
-			callback({
-				type = "executable",
-				command = netcoredbg_path,
-				args = { "--interpreter=vscode" },
-				-- Add environment variables to help with debugging
-				env = {
-					["NET_TRACE"] = "1", -- Enable .NET Core tracing
-					["GODOT_MONO_LOG_LEVEL"] = "debug",
-				},
-			})
-		else
-			notify.error("Invalid DAP adapter request type", { request = adapter_config.request })
+		if adapter_config.request ~= "attach" then
+			notify.error("Only 'attach' request type is supported")
 			callback(nil, "Invalid request type")
+			return
 		end
+
+		local netcoredbg_path = vim.fn.exepath("netcoredbg")
+		if not netcoredbg_path or netcoredbg_path == "" then
+			notify.error("netcoredbg not found in PATH. Please install it.")
+			callback(nil, "netcoredbg not found")
+			return
+		end
+
+		notify.debug("Found netcoredbg", { path = netcoredbg_path })
+
+		callback({
+			type = "executable",
+			command = netcoredbg_path,
+			args = { "--interpreter=vscode" },
+			env = {
+				["GODOT_MONO_LOG_LEVEL"] = "debug",
+				["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
+			},
+		})
 	end
 
-	-- Enhanced DAP configuration with better parameters
+	-- Enhanced DAP configuration
 	dap.configurations.cs = {
 		{
 			type = "godot_mono",
@@ -47,58 +78,58 @@ function M.setup()
 			processId = function()
 				local main = require("godot-debug")
 
-				-- Use stored PID if available
+				-- First try stored PID
 				if main._godot_pid and main._godot_pid > 0 then
 					notify.info("Using stored Godot PID: " .. main._godot_pid)
 					return main._godot_pid
 				end
 
-				-- Fallback to process picker with better error handling
-				notify.info("No stored PID, using process picker")
+				-- Try to find running Godot process
+				notify.info("Looking for running Godot process...")
+				local found_pid = find_godot_process()
+
+				if found_pid then
+					notify.info("Found Godot process with PID: " .. found_pid)
+					main._godot_pid = found_pid
+					return found_pid
+				end
+
+				-- Fallback to manual selection
+				notify.info("No Godot process found automatically, using process picker")
 				local selected_pid = require("dap.utils").pick_process()
 
 				if selected_pid then
 					notify.info("Selected PID from picker: " .. selected_pid)
+					main._godot_pid = selected_pid
 				else
-					notify.warn("No process selected from picker")
+					notify.error("No process selected")
 				end
 
 				return selected_pid
 			end,
+			-- Critical: These settings help with symbol resolution
 			justMyCode = false,
-			-- Additional configuration to handle the errors you're seeing
-			symbolSearchPath = "${workspaceFolder}",
-			program = function()
-				-- Try to find the Godot executable
-				local godot_path = config.get("godot_binary")
-				local full_path = vim.fn.exepath(godot_path)
-
-				if full_path and full_path ~= "" then
-					notify.debug("Found Godot executable", { path = full_path })
-					return full_path
-				else
-					notify.warn("Could not find Godot executable", { binary = godot_path })
-				end
-
-				return nil
-			end,
-			-- Add extra parameters to help with symbol resolution
 			justMyCodeStepping = false,
 			enableStepIntoProp = true,
 			enableStepFiltering = false,
 			stopAtEntry = false,
-			logToOutputPane = true,
-			-- This might help with the source mapping issues
+			symbolOptions = {
+				searchMicrosoftSymbolServer = false,
+				searchNuGetOrgSymbolServer = false,
+			},
+			-- Help locate source files
 			sourceFileMap = {
 				["<default>"] = "${workspaceFolder}",
 			},
+			-- Additional paths for symbol resolution
+			additionalSOLibSearchPath = vim.fn.getcwd() .. "\\.godot\\mono\\temp\\bin\\Debug",
 		},
 	}
 
 	-- Also register for gdscript
 	dap.configurations.gdscript = dap.configurations.cs
 
-	-- Enhanced auto-detection with logging
+	-- Auto-detection with better error handling
 	if config.get("auto_detect") then
 		local original_continue = dap.continue
 
@@ -109,7 +140,7 @@ function M.setup()
 			local main = require("godot-debug")
 
 			if is_godot and not main._state.in_progress and not dap.session() then
-				notify.info("Detected Godot project, launching Godot debugger")
+				notify.info("Detected Godot project, launching debugger")
 				main.launch()
 			else
 				notify.debug("Continuing with standard DAP", {
@@ -122,91 +153,63 @@ function M.setup()
 		end
 	end
 
-	-- Enhanced event listeners with detailed logging
+	-- Event listeners for debugging
 	dap.listeners.before.attach.godot_debug = function(session, body)
 		notify.debug("DAP before attach", { body = body })
 	end
 
 	dap.listeners.after.attach.godot_debug = function(session, body)
-		notify.info("DAP attached successfully", { body = body })
-	end
-
-	dap.listeners.before.attach.godot_debug = function(session, body)
-		notify.debug("DAP before event_initialized", { body = body })
+		notify.info("DAP attached successfully")
 	end
 
 	dap.listeners.after.event_initialized.godot_debug = function(session, body)
-		notify.info("DAP session initialized", { body = body })
+		notify.info("DAP session initialized")
 	end
 
 	dap.listeners.after.event_terminated.godot_debug = function(session, body)
 		notify.warn("DAP session terminated", { body = body })
 		local main = require("godot-debug")
 		main._state.in_progress = false
+		main._godot_pid = nil
 	end
 
 	dap.listeners.after.event_exited.godot_debug = function(session, body)
 		notify.warn("DAP session exited", { exit_code = body and body.exitCode })
 		local main = require("godot-debug")
 		main._state.in_progress = false
+		main._godot_pid = nil
 	end
 
-	-- Listen for configuration done to catch the error you're seeing
+	-- Error handling for configuration issues
 	dap.listeners.after.configurationDone.godot_debug = function(session, err)
 		if err then
 			notify.error("DAP configuration failed", {
 				error = err,
-				cmd = err.command,
 				message = err.message,
-				body = err.body,
 			})
 
-			-- Try to provide specific solutions based on the error
 			if err.message and err.message:find("0x80070057") then
-				notify.error("Invalid parameter error (0x80070057). This often happens when:")
-				notify.info("1. Godot's executable is out of date or doesn't match the debug symbols")
-				notify.info("2. The process ID is invalid or the process has exited")
-				notify.info("3. There's a mismatch between the Godot engine and its compilation")
-				notify.info("Try rebuilding your project and ensuring Godot is up to date")
+				notify.error("Invalid parameter error detected")
+				notify.info("Possible fixes:")
+				notify.info("1. Run :GodotDebugRebuild to rebuild the project")
+				notify.info("2. Ensure Godot is running with --debug flag")
+				notify.info("3. Check that \\.godot\\mono\\temp\\bin\\Debug contains debug symbols")
 			end
 		else
 			notify.info("DAP configuration completed successfully")
 		end
 	end
 
-	-- Listen for stackTrace responses to catch frame position errors
-	dap.listeners.after.stackTrace.godot_debug = function(session, err, body)
-		if err then
-			notify.error("Stack trace error", { error = err })
-		end
-
-		if body and body.stackFrames then
-			for _, frame in ipairs(body.stackFrames) do
-				-- Check if frame has invalid line/column
-				if frame.line and frame.column then
-					notify.verbose("Stack frame", {
-						file = frame.source and frame.source.path,
-						line = frame.line,
-						column = frame.column,
-					})
-				end
-			end
-		end
-	end
-
-	-- Generic error listener
 	dap.listeners.after.error.godot_debug = function(session, err)
-		notify.error("DAP error", { error = err })
+		notify.error("DAP error occurred", { error = err })
 	end
 
-	notify.info("DAP configuration complete with enhanced error handling")
+	notify.info("DAP configuration complete")
 end
 
--- Simple project detection with logging
 function M.is_godot_project()
 	local current_file = vim.fn.expand("%:p")
 	if current_file == "" then
-		notify.debug("No current file, not a Godot project")
 		return false
 	end
 
@@ -225,39 +228,60 @@ function M.is_godot_project()
 		current_dir = new_dir
 	end
 
-	notify.debug("Not a Godot project")
 	return false
 end
 
--- Helper function to rebuild and restart debugging when there are symbol issues
 function M.rebuild_and_restart()
 	notify.info("Rebuilding and restarting debug session...")
 
-	-- First, stop current session
 	local dap = require("dap")
 	if dap.session() then
 		dap.disconnect()
 		vim.wait(1000)
 	end
 
-	-- Force rebuild
 	local godot = require("godot-debug.godot")
-	local build_success = godot.build_solutions()
+
+	-- Clean and rebuild
+	godot.clean_build()
+	vim.wait(500)
+
+	local build_success = godot.build_solutions(true) -- force clean build
 
 	if build_success then
-		-- Wait a bit for build to settle
 		vim.wait(2000)
-
-		-- Kill any existing Godot processes
 		godot.kill_processes()
 		vim.wait(1000)
 
-		-- Restart the debug session
 		local main = require("godot-debug")
 		main.launch()
 	else
-		notify.error("Rebuild failed, cannot restart debugging")
+		notify.error("Rebuild failed, check build output")
 	end
+end
+
+-- Helper to verify debug symbols exist
+function M.verify_debug_symbols()
+	local debug_path = vim.fn.getcwd() .. "\\.godot\\mono\\temp\\bin\\Debug"
+
+	if vim.fn.isdirectory(debug_path) == 0 then
+		notify.error("Debug directory not found: " .. debug_path)
+		notify.info("Run :GodotDebugRebuild to generate debug symbols")
+		return false
+	end
+
+	-- Check for .pdb files (Windows) or .mdb files (Linux/Mac)
+	local pdb_files = vim.fn.glob(debug_path .. "/*.pdb", false, true)
+	local mdb_files = vim.fn.glob(debug_path .. "/*.mdb", false, true)
+
+	if #pdb_files == 0 and #mdb_files == 0 then
+		notify.error("No debug symbols found in " .. debug_path)
+		notify.info("Run :GodotDebugRebuild to generate debug symbols")
+		return false
+	end
+
+	notify.info("Found debug symbols in " .. debug_path)
+	return true
 end
 
 return M
