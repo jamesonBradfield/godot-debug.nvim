@@ -74,6 +74,7 @@ local function run()
 					request = "attach",
 					name = "attach",
 					processId = pid[2]["pid"],
+					justMyCode = true,
 				},
 			}
 			dap.continue()
