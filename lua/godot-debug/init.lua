@@ -1,184 +1,114 @@
 -- File: lua/godot-debug/init.lua - With enhanced notifications
 local M = {}
+local dap = require("dap")
+local function run_command_wait_for_string(cmd, wait_string, callback, stop_on_match)
+	stop_on_match = stop_on_match or false -- Default to false for backwards compatibility
+	local output_buffer = ""
+	local callback_called = false -- Prevent double callback
 
-local notify = require("godot-debug.notifications")
+	local job_id = vim.fn.jobstart(cmd, {
+		on_stdout = function(job_id, data, event)
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					output_buffer = output_buffer .. line .. "\n"
+					if string.find(line, wait_string) then
+						if not callback_called then
+							callback_called = true
+							callback(true, output_buffer, job_id)
 
-local state = {
-	in_progress = false,
-}
+							if stop_on_match then
+								vim.fn.jobstop(job_id)
+							end
+						end
+						return
+					end
+				end
+			end
+		end,
+		on_exit = function(job_id, exit_code, event)
+			if not callback_called and not string.find(output_buffer, wait_string) then
+				callback(false, output_buffer, job_id)
+			end
+		end,
+	})
 
-M._state = state
-
--- Setup function
-function M.setup(user_config)
-	local config = require("godot-debug.config")
-	local dap_config = require("godot-debug.dap")
-
-	config.setup(user_config)
-	dap_config.setup()
-
-	-- Store PID for DAP
-	M._godot_pid = nil
-
-	-- Create user commands
-	vim.api.nvim_create_user_command("GodotDebug", function()
-		notify.info("GodotDebug command triggered")
-		M.launch()
-	end, {})
-
-	vim.api.nvim_create_user_command("GodotQuit", function()
-		notify.info("GodotQuit command triggered")
-		local godot = require("godot-debug.godot")
-		godot.kill_processes()
-	end, {})
-
-	-- Add commands for log management
-	vim.api.nvim_create_user_command("GodotDebugLog", function()
-		notify.view_log()
-	end, { desc = "View Godot debug log in split" })
-
-	vim.api.nvim_create_user_command("GodotDebugClearLog", function()
-		notify.clear_log()
-	end, { desc = "Clear Godot debug log" })
-
-	vim.api.nvim_create_user_command("GodotDebugTail", function()
-		notify.tail_log()
-	end, { desc = "Tail Godot debug log (auto-refresh)" })
-
-	-- Add command to rebuild and restart debugging when symbol issues occur
-	vim.api.nvim_create_user_command("GodotDebugRebuild", function()
-		notify.info("Rebuilding and restarting debug session...")
-		dap_config.rebuild_and_restart()
-	end, { desc = "Rebuild and restart Godot debug session" })
-
-	notify.info("Godot Debug plugin initialized")
+	return job_id -- Return job_id so caller can stop it manually if needed
+end
+local function parse_csv_line(line)
+	local fields = {}
+	-- Match quoted fields: "field content"
+	for field in line:gmatch('"([^"]*)"') do
+		table.insert(fields, field)
+	end
+	return fields
 end
 
--- Launch function with detailed logging
-function M.launch()
-	notify.verbose("=== Starting Godot debug launch ===")
-
-	if state.in_progress then
-		notify.warn("Debug session already in progress")
-		return
+local function get_godot_processes()
+	local result = vim.fn.system('tasklist /FI "IMAGENAME eq godot-mono.exe" /FO CSV')
+	local processes = {}
+	local header = false
+	for line in result:gmatch("[^\r\n]+") do
+		local fields = parse_csv_line(line)
+		if header ~= false then
+			table.insert(processes, {
+				name = fields[1],
+				pid = fields[2],
+				memory = fields[5],
+			})
+		end
+		header = true
 	end
 
-	state.in_progress = true
+	return processes
+end
 
-	-- Start the main operation
-	local launch_operation = notify.start_operation("GODOT_LAUNCH", "Launching Godot debug session")
-
-	local godot = require("godot-debug.godot")
-
-	-- Step 1: Select scene
-	notify.debug("Step 1: Starting scene selection")
-	godot.select_scene(function(scene_path)
-		if not scene_path then
-			state.in_progress = false
-			notify.complete_operation(launch_operation, false, "No scene selected")
-			notify.error("No scene selected")
-			return
+local function run()
+	run_command_wait_for_string("godot-mono --path .", "Godot Engine", function(found, output)
+		if found then
+			print("Run Succeeded!")
+			local pid = get_godot_processes()
+			vim.notify(vim.inspect(pid))
+			dap.configurations.cs = {
+				{
+					type = "coreclr",
+					request = "attach",
+					name = "attach",
+					processId = pid[2]["pid"],
+				},
+			}
+			dap.continue()
+		else
+			print("Run Failed!")
 		end
-
-		notify.debug("Scene selected", { scene_path = scene_path })
-
-		-- Step 2: Build solutions
-		notify.debug("Step 2: Building solutions")
-		local build_operation = notify.start_operation("BUILD_SOLUTIONS", "Building Godot solutions")
-
-		local build_success = godot.build_solutions()
-
-		notify.complete_operation(
-			build_operation,
-			build_success,
-			build_success and "Build successful" or "Build failed"
-		)
-
-		if not build_success then
-			state.in_progress = false
-			notify.complete_operation(launch_operation, false, "Build failed")
-			notify.error("Build failed - check build output")
-			return
-		end
-
-		-- Step 3: Launch Godot
-		notify.debug("Step 3: Launching Godot process")
-		local launch_process_operation = notify.start_operation("LAUNCH_GODOT", "Launching Godot with scene")
-
-		local pid = godot.launch_scene(scene_path)
-
-		if not pid or pid <= 0 then
-			state.in_progress = false
-			notify.complete_operation(launch_process_operation, false, "Failed to launch Godot")
-			notify.complete_operation(launch_operation, false, "Failed to launch Godot process")
-			notify.error("Failed to launch Godot")
-			return
-		end
-
-		notify.complete_operation(launch_process_operation, true, "Godot launched with PID: " .. pid)
-		notify.debug("Godot launched", { pid = pid })
-
-		-- Step 4: Connect debugger
-		notify.debug("Step 4: Connecting debugger")
-		M._godot_pid = pid
-		local dap = require("dap")
-
-		-- Wait a moment for Godot to start
-		vim.defer_fn(function()
-			local connect_operation = notify.start_operation("CONNECT_DEBUGGER", "Connecting DAP debugger")
-
-			-- Use pcall to catch any DAP errors
-			local success, err = pcall(function()
-				dap.continue()
-			end)
-
-			if success then
-				notify.complete_operation(connect_operation, true, "Debugger connected successfully")
-				notify.complete_operation(launch_operation, true, "Godot debug session launched successfully")
-				notify.info("Godot debug session started successfully")
-			else
-				notify.complete_operation(connect_operation, false, "Error: " .. tostring(err))
-				notify.complete_operation(launch_operation, false, "Debugger connection failed")
-				notify.error("Failed to connect debugger: " .. tostring(err))
-			end
-
-			state.in_progress = false
-			notify.verbose("=== Godot debug launch complete ===")
-		end, 1000)
 	end)
 end
-
--- Set log level function
-function M.set_log_level(level)
-	notify.debug("Setting log level", { level = level })
-	notify.info("Log level set to: " .. tostring(level))
+-- the function to build our godot-mono project, we should setup callbacks/listeners we can define in our config for tasks to run before/after.
+local function build()
+	run_command_wait_for_string(
+		"godot-mono --headless --build-solutions",
+		"dotnet_build_project: end",
+		function(found, output)
+			if found then
+				print("Build Succeeded!")
+				run()
+			else
+				print("Build Failed!")
+			end
+		end,
+		true
+	)
 end
 
--- Get debug status
-function M.get_debug_status()
-	local status = {
-		in_progress = state.in_progress,
-		godot_pid = M._godot_pid,
-		has_dap_session = require("dap").session() ~= nil,
-	}
+-- NOTE: both check_for_project and get_project_root have similiar code in my mind which means either (we callback and write one function), check if there is already something to get us 90% of the way there, or write our own function containing the "subset" of shared functionality.
 
-	notify.debug("Debug status requested", status)
+-- check if we are in a godot-project sub-folder, (we can setup seperate strategies to find this "git, project.godot,etc")
+local function check_for_project() end
+-- actually grab the project root, this will be useful for both converting our absolute paths to godot rel format, and scene stuffs.
+local function get_project_root() end
 
-	return status
+M.setup = function() end
+-- the actual launching point for our plugin, we should spend some time thinking through how we will handle our pid grabbing for dap.
+M.launch = function()
+	build()
 end
-
--- Cleanup function
-function M.cleanup()
-	notify.info("Cleaning up Godot debug session")
-
-	-- Clear notifications
-	notify.clear_all()
-
-	-- Reset state
-	state.in_progress = false
-	M._godot_pid = nil
-
-	notify.info("Cleanup complete")
-end
-
 return M
