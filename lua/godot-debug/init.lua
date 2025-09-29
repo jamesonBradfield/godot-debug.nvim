@@ -73,7 +73,7 @@ local function run()
 					type = "coreclr",
 					request = "attach",
 					name = "attach",
-					processId = pid[2]["pid"],
+					processId = tonumber(pid[2]["pid"]),
 					justMyCode = true,
 				},
 			}
@@ -84,20 +84,16 @@ local function run()
 	end)
 end
 -- the function to build our godot-mono project, we should setup callbacks/listeners we can define in our config for tasks to run before/after.
+-- FIX: would like to match 'build succeeded' text, although that can end in a lot of ways, and this is non blocking.
 local function build()
-	run_command_wait_for_string(
-		"godot-mono --headless --build-solutions",
-		"dotnet_build_project: end",
-		function(found, output)
-			if found then
-				print("Build Succeeded!")
-				run()
-			else
-				print("Build Failed!")
-			end
-		end,
-		true
-	)
+	run_command_wait_for_string("dotnet build", "Build succeeded in 0.8s", function(found, output)
+		if found then
+			print("Build Succeeded!")
+			run()
+		else
+			print("Build Failed!")
+		end
+	end, true)
 end
 
 -- NOTE: both check_for_project and get_project_root have similiar code in my mind which means either (we callback and write one function), check if there is already something to get us 90% of the way there, or write our own function containing the "subset" of shared functionality.
